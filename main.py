@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Delivery script for the news-image-20261123 entry.
 
-The artwork itself is finished ahead of time: ``entry.png``, sitting next
-to this file, holds the rendered front page. Nothing here draws, resizes
-or otherwise touches the picture. The one job of this script is to act as
-a careful courier — confirm the committed file really is a PNG that fits
+The artwork normally sits finished beside this file as ``entry.png``.
+When it is missing — the platform checks the entry out of a repository
+that carries only the source files, no rendered PNG — the script first
+asks the companion module ``make_image`` to draw the page, then carries
+on as usual. Apart from that fallback, nothing here draws, resizes or
+otherwise touches the picture. The one job of this script is to act as
+a careful courier — confirm the file really is a PNG that fits
 the competition limits, then drop an exact copy of it into the folder the
 grader names through the MAKEFUN_OUTPUT_DIR environment variable (or
 ``/output`` when that variable is not set).
@@ -76,6 +79,27 @@ def load_and_check(artwork_path):
     return blob, width, height
 
 
+def ensure_artwork(artwork_path):
+    """See to it that ``artwork_path`` exists, drawing the page if needed.
+
+    A checkout taken from the repository holds the drawing code but not
+    the rendered PNG, so on a first run there the picture has to be made
+    before it can be checked and delivered. ``make_image.build()`` writes
+    the PNG next to its own file, which is the very folder this script
+    lives in. The import stays inside this function on purpose: when the
+    artwork is already on disk, the drawing module — and the Pillow
+    library it needs — is never loaded at all.
+    """
+    if artwork_path.is_file():
+        return
+    folder = str(artwork_path.parent)
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
+    import make_image
+
+    make_image.build()
+
+
 def deliver(blob, target_dir):
     """Write ``blob`` to ``target_dir/entry.png`` in slices; return the path."""
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -88,8 +112,16 @@ def deliver(blob, target_dir):
 
 def run():
     script_dir = Path(__file__).resolve().parent
+    artwork_path = script_dir / ARTWORK_NAME
     try:
-        blob, width, height = load_and_check(script_dir / ARTWORK_NAME)
+        ensure_artwork(artwork_path)
+    except Exception as failure:
+        # Drawing did not work out; load_and_check below will refuse with
+        # the plain "no entry.png" message, which is the clearer report.
+        print(f"could not produce {ARTWORK_NAME}: {failure}",
+              file=sys.stderr)
+    try:
+        blob, width, height = load_and_check(artwork_path)
     except ArtworkProblem as problem:
         print(f"refusing to deliver: {problem}", file=sys.stderr)
         return 1
