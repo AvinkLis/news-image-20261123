@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 """Delivery script for the news-image-20261123 entry.
 
-The artwork normally sits finished beside this file as ``entry.png``.
-When it is missing — the platform checks the entry out of a repository
-that carries only the source files, no rendered PNG — the script first
-asks the companion module ``make_image`` to draw the page, then carries
-on as usual. Apart from that fallback, nothing here draws, resizes or
-otherwise touches the picture. The one job of this script is to act as
-a careful courier — confirm the file really is a PNG that fits
-the competition limits, then drop an exact copy of it into the folder the
-grader names through the MAKEFUN_OUTPUT_DIR environment variable (or
-``/output`` when that variable is not set).
+The one job of this script is to act as a careful courier — confirm the
+picture really is a PNG that fits the competition limits, then drop an
+exact copy of it into the folder the grader names through the
+MAKEFUN_OUTPUT_DIR environment variable (or ``/output`` when that
+variable is not set). Nothing here draws, resizes or otherwise touches
+the picture itself.
+
+Where the picture comes from, in order of preference:
+
+1. ``entry.png`` beside this script — the finished artwork, when it is
+   present (local runs, a full checkout).
+2. ``entry.png.b64`` beside this script — the same artwork carried as
+   base64 text. This is the path the platform takes: its checkout holds
+   text files only, the repository folder is read-only, and no imaging
+   library is installed there. The decode happens in memory and the
+   script writes nothing next to itself.
+3. A fresh drawing from the companion module ``make_image`` — local
+   development only. It needs Pillow and writes into this folder, so it
+   is never used on the platform; the embedded copy above always serves
+   there first.
 
 Standard library only.
 """
 
+import base64
 import os
 import sys
 from pathlib import Path
 
 ARTWORK_NAME = "entry.png"
+EMBEDDED_NAME = "entry.png.b64"
 
 # Competition limits for the delivered image.
 BYTE_LIMIT = 1024 * 1024   # the file may not grow past one mebibyte
@@ -60,14 +72,11 @@ def probe_dimensions(blob):
     return width, height
 
 
-def load_and_check(artwork_path):
-    """Read the artwork and run every check; return (blob, width, height)."""
-    if not artwork_path.is_file():
-        raise ArtworkProblem(f"no {ARTWORK_NAME} found beside this script")
-    blob = artwork_path.read_bytes()
+def check_blob(blob, label):
+    """Run every delivery check over raw PNG bytes; return (blob, w, h)."""
     if len(blob) > BYTE_LIMIT:
         raise ArtworkProblem(
-            f"{ARTWORK_NAME} weighs {len(blob)} bytes; "
+            f"{label} weighs {len(blob)} bytes; "
             f"the limit is {BYTE_LIMIT}"
         )
     width, height = probe_dimensions(blob)
@@ -79,16 +88,43 @@ def load_and_check(artwork_path):
     return blob, width, height
 
 
-def ensure_artwork(artwork_path):
-    """See to it that ``artwork_path`` exists, drawing the page if needed.
+def load_and_check(artwork_path):
+    """Read the artwork file and run every check over its bytes."""
+    if not artwork_path.is_file():
+        raise ArtworkProblem(f"no {ARTWORK_NAME} found beside this script")
+    return check_blob(artwork_path.read_bytes(), ARTWORK_NAME)
 
-    A checkout taken from the repository holds the drawing code but not
-    the rendered PNG, so on a first run there the picture has to be made
-    before it can be checked and delivered. ``make_image.build()`` writes
-    the PNG next to its own file, which is the very folder this script
-    lives in. The import stays inside this function on purpose: when the
-    artwork is already on disk, the drawing module — and the Pillow
-    library it needs — is never loaded at all.
+
+def load_embedded(script_dir):
+    """Decode the base64-embedded artwork; return checked (blob, w, h).
+
+    Returns None when no embedded copy sits beside the script. Raises
+    ArtworkProblem when one is present but damaged. The bytes live only
+    in memory — nothing is written to ``script_dir``, which on the
+    platform is a read-only checkout.
+    """
+    embedded_path = script_dir / EMBEDDED_NAME
+    if not embedded_path.is_file():
+        return None
+    encoded = embedded_path.read_bytes().strip()
+    try:
+        blob = base64.b64decode(encoded, validate=True)
+    except ValueError as failure:
+        raise ArtworkProblem(
+            f"{EMBEDDED_NAME} is not valid base64: {failure}"
+        )
+    return check_blob(blob, EMBEDDED_NAME)
+
+
+def ensure_artwork(artwork_path):
+    """Draw the page with ``make_image`` so ``artwork_path`` exists.
+
+    Last resort for local development only: it needs Pillow and writes
+    the PNG next to this script, neither of which the platform allows —
+    and the platform never reaches this, because the embedded base64
+    copy is served first. The import stays inside this function on
+    purpose: when the artwork comes from disk or from the embedded
+    copy, the drawing module is never loaded at all.
     """
     if artwork_path.is_file():
         return
@@ -110,18 +146,34 @@ def deliver(blob, target_dir):
     return target
 
 
-def run():
-    script_dir = Path(__file__).resolve().parent
+def obtain_artwork(script_dir):
+    """Return checked (blob, width, height) from the best source at hand.
+
+    Preference order: the rendered ``entry.png`` beside the script; the
+    base64-embedded copy (the platform path — decoded in memory, with
+    nothing written to the script's folder); and, for local development
+    only, a fresh drawing from ``make_image``.
+    """
     artwork_path = script_dir / ARTWORK_NAME
+    if artwork_path.is_file():
+        return load_and_check(artwork_path)
+    embedded = load_embedded(script_dir)
+    if embedded is not None:
+        return embedded
     try:
         ensure_artwork(artwork_path)
     except Exception as failure:
-        # Drawing did not work out; load_and_check below will refuse with
-        # the plain "no entry.png" message, which is the clearer report.
+        # Drawing did not work out; load_and_check below will refuse
+        # with the plain "no entry.png" message, which is clearer.
         print(f"could not produce {ARTWORK_NAME}: {failure}",
               file=sys.stderr)
+    return load_and_check(artwork_path)
+
+
+def run():
+    script_dir = Path(__file__).resolve().parent
     try:
-        blob, width, height = load_and_check(artwork_path)
+        blob, width, height = obtain_artwork(script_dir)
     except ArtworkProblem as problem:
         print(f"refusing to deliver: {problem}", file=sys.stderr)
         return 1
